@@ -46,27 +46,22 @@ def scrape_mkv_pricing():
         print(f"[scrape_mkv_pricing] ERROR: {e}")
         return []
 
-    soup     = BeautifulSoup(resp.text, "html.parser")
+    soup  = BeautifulSoup(resp.text, "html.parser")
     vehicles = []
 
-    # Each vehicle card has an h5 name and h4 price block
-    # Structure: h5 = name, h4 = "10999 AED7999 AED/ Day" (both prices in one tag)
     for h5 in soup.select("h5"):
         try:
             name = h5.get_text(strip=True)
             if not name:
                 continue
 
-            # Category is in the <p> before the h5
-            cat_el = h5.find_previous("p")
+            cat_el   = h5.find_previous("p")
             category = cat_el.get_text(strip=True) if cat_el else "Luxury"
 
-            # Price is in the h4 after the h5
             h4 = h5.find_next("h4")
             if not h4:
                 continue
 
-            # h4 text looks like: "10999 AED7999 AED/ Day"
             price_text = h4.get_text(strip=True)
             nums = re.findall(r"\d+", price_text)
             if len(nums) < 2:
@@ -80,10 +75,8 @@ def scrape_mkv_pricing():
 
             disc_pct = round((orig - disc) / orig * 100)
 
-            # Get the car slug from nearest parent <a href="/car/...">
             parent_a = h5.find_parent("a", href=re.compile(r"^/car/"))
             if not parent_a:
-                # try finding the Reserve link nearby
                 reserve = h5.find_next("a", href=re.compile(r"^/car/"))
                 if not reserve:
                     continue
@@ -101,7 +94,6 @@ def scrape_mkv_pricing():
                 "url":              f"https://www.mkvluxury.com/car/{slug}",
                 "km_included":      200,
             })
-
         except Exception:
             continue
 
@@ -153,7 +145,6 @@ def get_availability_from_appic():
 
     availability = {}
 
-    # Mark checked-out vehicles as unavailable — Active contracts only
     for record in checked_out:
         name     = record.get("vehicleName", "").strip().lower()
         contract = record.get("contractID", "")
@@ -166,7 +157,6 @@ def get_availability_from_appic():
             "returning_date": ret_date,
         }
 
-    # Mark returning vehicles — Active contracts only
     for record in checked_in:
         name     = record.get("vehicleName", "").strip().lower()
         contract = record.get("contractID", "")
@@ -318,7 +308,7 @@ Staff query: "{msg}"
 
 
 # ─────────────────────────────────────────────
-# AI CALL
+# AI CALL — FIXED model name
 # ─────────────────────────────────────────────
 
 def get_ai_response(system, prompt):
@@ -357,12 +347,13 @@ def send_whatsapp(to, body, channel_id):
             timeout=8
         )
         print(f"[send_whatsapp] to={to} channel={channel_id} status={resp.status_code}")
+        print(f"[send_whatsapp] response={resp.text}")
     except Exception as e:
         print(f"[send_whatsapp] ERROR: {e}")
 
 
 # ─────────────────────────────────────────────
-# WEBHOOK — main entry point
+# WEBHOOK — FIXED payload parsing for Gallabox
 # ─────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
@@ -371,34 +362,44 @@ def webhook():
         data = request.json
         print(f"[webhook] payload: {data}")
 
+        # Extract phone — handles Gallabox direct format and flow format
         phone = (
-            data.get("contacts", [{}])[0].get("phone")
+            data.get("whatsapp", {}).get("from")
+            or data.get("contacts", [{}])[0].get("phone")
             or data.get("from")
             or ""
         )
+        # Ensure phone starts with +
+        if phone and not phone.startswith("+"):
+            phone = "+" + phone
 
+        # Extract message text — handles Gallabox direct format and flow format
         msg = (
-            data.get("messages", [{}])[0].get("text", {}).get("body")
+            data.get("whatsapp", {}).get("text", {}).get("body")
+            or data.get("messages", [{}])[0].get("text", {}).get("body")
             or data.get("text", {}).get("body")
             or data.get("message", "")
             or ""
         ).strip()
 
-        if not phone or not msg:
-            return jsonify({"status": "ignored", "reason": "no phone or message"}), 200
-
+        # Extract channel ID — use Green channel as default
         incoming_channel = (
-            data.get("channel", {}).get("id")
-            or data.get("channelId")
+            data.get("channelId")
+            or data.get("channel", {}).get("id")
             or GALLABOX_CHANNEL_GREEN
         )
 
         print(f"[webhook] from={phone} channel={incoming_channel} msg={msg}")
 
+        if not phone or not msg:
+            return jsonify({"status": "ignored", "reason": "no phone or message"}), 200
+
+        # Pull live data
         mkv_vehicles = scrape_mkv_pricing()
         appic_avail  = get_availability_from_appic()
         fleet        = merge_fleet(mkv_vehicles, appic_avail)
 
+        # Route by caller type
         if phone in ADMIN_NUMBERS:
             prompt = build_admin_prompt(msg, fleet)
             reply  = get_ai_response(ADMIN_SYSTEM, prompt)
@@ -407,7 +408,7 @@ def webhook():
             reply  = get_ai_response(CUSTOMER_SYSTEM, prompt)
 
         send_whatsapp(phone, reply, incoming_channel)
-        return jsonify({"status": "ok"}), 200
+        return jsonify({"status": "ok", "message": reply}), 200
 
     except Exception as e:
         print(f"[webhook] UNHANDLED ERROR: {e}")
@@ -423,7 +424,7 @@ def health():
     return jsonify({
         "status":  "MKV AI Agent is running",
         "date":    str(date.today()),
-        "version": "2.0"
+        "version": "3.0"
     }), 200
 
 
