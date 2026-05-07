@@ -27,9 +27,8 @@ GALLABOX_CHANNEL_ORANGE = os.environ["GALLABOX_CHANNEL_ID_Orange"]
 
 claude                  = anthropic.Anthropic(api_key=os.environ["CLAUDE_API_KEY"])
 
-# WhatsApp numbers of MKV staff — will receive full admin/operational responses
 ADMIN_NUMBERS = {
-    "+971562794545",   # replace with actual staff numbers
+    "+971562794545",
     "+971529409280",
 }
 
@@ -38,12 +37,7 @@ ADMIN_NUMBERS = {
 # SOURCE 1 — PRICING from mkvluxury.com
 # ─────────────────────────────────────────────
 
-def scrape_mkv_pricing() -> list:
-    """
-    Scrapes live vehicle pricing from mkvluxury.com/cars.
-    Returns list of dicts with name, category, original_price,
-    discounted_price, discount_pct, url.
-    """
+def scrape_mkv_pricing():
     headers = {"User-Agent": "Mozilla/5.0 (compatible; MKV-Agent/1.0)"}
     try:
         resp = requests.get(MKV_FLEET_URL, headers=headers, timeout=10)
@@ -52,16 +46,18 @@ def scrape_mkv_pricing() -> list:
         print(f"[scrape_mkv_pricing] ERROR: {e}")
         return []
 
-    soup     = BeautifulSoup(resp.text, "html.parser")
-    vehicles = []
+    soup  = BeautifulSoup(resp.text, "html.parser")
+    cards = soup.select("a[href^='/car/']")
+    print(f"[scrape_mkv_pricing] found {len(cards)} car cards on page")
 
-    for card in soup.select("a[href^='/car/']"):
+    vehicles = []
+    for card in cards:
         try:
-            name_el  = card.select_one("h5")
-            cat_el   = card.select_one("p")
-            prices   = card.select("h4")
-            disc_el  = card.find(string=re.compile(r"\d+%\s*OFF", re.I))
-            slug     = card["href"].replace("/car/", "").strip("/")
+            name_el = card.select_one("h5")
+            cat_el  = card.select_one("p")
+            prices  = card.select("h4")
+            disc_el = card.find(string=re.compile(r"\d+%\s*OFF", re.I))
+            slug    = card["href"].replace("/car/", "").strip("/")
 
             if not name_el or len(prices) < 2:
                 continue
@@ -69,9 +65,9 @@ def scrape_mkv_pricing() -> list:
             def parse_aed(el):
                 return int(re.sub(r"[^\d]", "", el.get_text()))
 
-            orig      = parse_aed(prices[0])
-            disc      = parse_aed(prices[1])
-            disc_pct  = 0
+            orig     = parse_aed(prices[0])
+            disc     = parse_aed(prices[1])
+            disc_pct = 0
             if disc_el:
                 m = re.search(r"(\d+)", disc_el)
                 if m:
@@ -92,7 +88,7 @@ def scrape_mkv_pricing() -> list:
         except Exception:
             continue
 
-    print(f"[scrape_mkv_pricing] {len(vehicles)} vehicles loaded from website")
+    print(f"[scrape_mkv_pricing] {len(vehicles)} vehicles parsed successfully")
     return vehicles
 
 
@@ -100,12 +96,7 @@ def scrape_mkv_pricing() -> list:
 # SOURCE 2 — AVAILABILITY from Appic Fleet API
 # ─────────────────────────────────────────────
 
-def fetch_appic_data(direction: str, start: str, end: str) -> list:
-    """
-    Calls the Appic Fleet check-in/checkout API.
-    direction: "Out" = vehicles leaving (rented out)
-               "In"  = vehicles returning
-    """
+def fetch_appic_data(direction, start, end):
     try:
         resp = requests.post(
             APPIC_URL,
@@ -119,82 +110,52 @@ def fetch_appic_data(direction: str, start: str, end: str) -> list:
         )
         resp.raise_for_status()
         result = resp.json()
-        print(f"[fetch_appic_data] direction={direction} response: {result}")
+        print(f"[fetch_appic_data] direction={direction} count={result.get('count', '?')}")
 
-        # Handle both list response and wrapped response
         if isinstance(result, list):
             return result
         if isinstance(result, dict):
-            # Try common wrapper keys
-            for key in ("data", "records", "vehicles", "results", "checkouts", "checkins"):
-                if key in result and isinstance(result[key], list):
-                    return result[key]
-            # If issuccess is false, log and return empty
             if result.get("issuccess") is False:
                 print(f"[fetch_appic_data] API error: {result.get('message')}")
                 return []
+            for key in ("data", "records", "vehicles", "results"):
+                if key in result and isinstance(result[key], list):
+                    return result[key]
         return []
     except Exception as e:
         print(f"[fetch_appic_data] ERROR direction={direction}: {e}")
         return []
 
 
-def get_availability_from_appic() -> dict:
-    """
-    Derives real-time availability by comparing checkouts vs check-ins.
-    Returns dict keyed by lowercase vehicle name:
-    {
-      "lamborghini urus s": {
-          "available": False,
-          "status": "Checked out",
-          "returning_date": "2026-05-10"
-      }
-    }
-    Vehicles NOT found in Appic = assumed available.
-    """
+def get_availability_from_appic():
     today     = date.today().strftime("%Y-%m-%d")
     next_week = (date.today() + timedelta(days=7)).strftime("%Y-%m-%d")
 
     checked_out = fetch_appic_data("Out", today, next_week)
     checked_in  = fetch_appic_data("In",  today, next_week)
 
-    # Helper: extract vehicle name from a record
-    def get_name(record):
-        for field in ("vehicle_name", "car_name", "car", "vehicle", "name", "Vehicle"):
-            val = record.get(field, "")
-            if val:
-                return str(val).lower().strip()
-        return ""
-
-    # Helper: extract date from a record
-    def get_date(record, fallback):
-        for field in ("return_date", "end_date", "endDate", "checkout_date",
-                      "date", "start_date", "startDate", "checkin_date"):
-            val = record.get(field, "")
-            if val:
-                return str(val)
-        return fallback
-
     availability = {}
 
-    # Mark checked-out vehicles as unavailable
+    # Mark checked-out vehicles as unavailable — Active contracts only
     for record in checked_out:
-        name = get_name(record)
-        if not name:
+        name     = record.get("vehicleName", "").strip().lower()
+        contract = record.get("contractID", "")
+        if not name or "Draft" in contract:
             continue
-        ret_date = get_date(record, next_week)
+        ret_date = record.get("endDate", next_week)
         availability[name] = {
             "available":      False,
             "status":         "Checked out",
             "returning_date": ret_date,
         }
 
-    # Mark returning vehicles
+    # Mark returning vehicles — Active contracts only
     for record in checked_in:
-        name = get_name(record)
-        if not name:
+        name     = record.get("vehicleName", "").strip().lower()
+        contract = record.get("contractID", "")
+        if not name or "Draft" in contract:
             continue
-        checkin_date = get_date(record, today)
+        checkin_date = record.get("endDate", today)
         is_today     = checkin_date == today
         availability[name] = {
             "available":      is_today,
@@ -210,28 +171,28 @@ def get_availability_from_appic() -> dict:
 # MERGE — combine both sources
 # ─────────────────────────────────────────────
 
-def merge_fleet(mkv_vehicles: list, appic_avail: dict) -> list:
-    """
-    Joins MKV pricing with Appic availability.
-    Uses fuzzy name matching (exact → partial word match).
-    Vehicles not found in Appic default to available.
-    """
-    merged = []
+def merge_fleet(mkv_vehicles, appic_avail):
+    skip_words = {"the", "and", "for", "2024", "2025", "2026"}
+    merged     = []
+
     for v in mkv_vehicles:
-        name_key   = v["name"].lower().strip()
+        name_upper = v["name"].upper().strip()
+        mkv_words  = set(
+            w for w in name_upper.split()
+            if len(w) > 3 and w.lower() not in skip_words
+        )
         avail_data = None
 
-        # 1. Exact match
-        if name_key in appic_avail:
-            avail_data = appic_avail[name_key]
-        else:
-            # 2. Partial match — any significant word overlap
-            name_words = set(w for w in name_key.split() if len(w) > 3)
-            for k, a in appic_avail.items():
-                k_words = set(w for w in k.split() if len(w) > 3)
-                if name_words & k_words:  # intersection
-                    avail_data = a
-                    break
+        for appic_name, a in appic_avail.items():
+            appic_words = set(
+                w for w in appic_name.upper().split()
+                if len(w) > 3 and w.lower() not in skip_words
+            )
+            overlap = mkv_words & appic_words
+            if len(overlap) >= 2 or (len(overlap) == 1 and len(mkv_words) <= 2):
+                avail_data = a
+                print(f"[merge] MATCHED '{v['name']}' -> '{appic_name}' via {overlap}")
+                break
 
         if avail_data:
             v["available"]      = avail_data["available"]
@@ -277,7 +238,7 @@ For each vehicle include:
 - Full name and category
 - Original price vs discounted price (AED) + discount %
 - Availability status and returning date
-- Revenue opportunity (discounted price × available units if known)
+- Revenue opportunity (discounted price x available units if known)
 - Flag any vehicle checked out with no return date
 
 Format as a clean operational report. Be precise and data-driven.
@@ -286,7 +247,7 @@ Availability source: Appic Fleet API (live)
 """
 
 
-def build_customer_prompt(msg: str, fleet: list) -> str:
+def build_customer_prompt(msg, fleet):
     available   = [v for v in fleet if v["available"]]
     coming_soon = [v for v in fleet if not v["available"] and v.get("returning_date")]
 
@@ -314,10 +275,10 @@ Customer WhatsApp message: "{msg}"
 Reply as MKV's luxury concierge."""
 
 
-def build_admin_prompt(msg: str, fleet: list) -> str:
+def build_admin_prompt(msg, fleet):
     lines = "\n".join([
         f"- {v['name']} | {v['category']} | "
-        f"Original: AED {v['original_price']:,} → Discounted: AED {v['discounted_price']:,} "
+        f"Original: AED {v['original_price']:,} -> Discounted: AED {v['discounted_price']:,} "
         f"({v['discount_pct']}% OFF) | "
         f"Status: {v['status']} | "
         f"Returning: {v['returning_date'] or 'N/A'} | "
@@ -343,7 +304,7 @@ Staff query: "{msg}"
 # AI CALL
 # ─────────────────────────────────────────────
 
-def get_ai_response(system: str, prompt: str) -> str:
+def get_ai_response(system, prompt):
     try:
         msg = claude.messages.create(
             model="claude-sonnet-4-20250514",
@@ -361,14 +322,14 @@ def get_ai_response(system: str, prompt: str) -> str:
 # GALLABOX SENDER
 # ─────────────────────────────────────────────
 
-def send_whatsapp(to: str, body: str, channel_id: str):
+def send_whatsapp(to, body, channel_id):
     try:
         resp = requests.post(
             "https://server.gallabox.com/devapi/messages/whatsapp",
             headers={
-                "apiKey":        GALLABOX_API_KEY,
-                "apiSecret":     GALLABOX_SECRET,
-                "Content-Type":  "application/json"
+                "apiKey":       GALLABOX_API_KEY,
+                "apiSecret":    GALLABOX_SECRET,
+                "Content-Type": "application/json"
             },
             json={
                 "channelId":   channel_id,
@@ -390,17 +351,15 @@ def send_whatsapp(to: str, body: str, channel_id: str):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        data  = request.json
+        data = request.json
         print(f"[webhook] payload: {data}")
 
-        # Extract phone number
         phone = (
             data.get("contacts", [{}])[0].get("phone")
             or data.get("from")
             or ""
         )
 
-        # Extract message text
         msg = (
             data.get("messages", [{}])[0].get("text", {}).get("body")
             or data.get("text", {}).get("body")
@@ -411,21 +370,18 @@ def webhook():
         if not phone or not msg:
             return jsonify({"status": "ignored", "reason": "no phone or message"}), 200
 
-        # Detect which channel the message came in on — reply on the same one
         incoming_channel = (
             data.get("channel", {}).get("id")
             or data.get("channelId")
-            or GALLABOX_CHANNEL_GREEN   # default to green channel
+            or GALLABOX_CHANNEL_GREEN
         )
 
         print(f"[webhook] from={phone} channel={incoming_channel} msg={msg}")
 
-        # Pull live data from both sources
         mkv_vehicles = scrape_mkv_pricing()
         appic_avail  = get_availability_from_appic()
         fleet        = merge_fleet(mkv_vehicles, appic_avail)
 
-        # Route by caller type
         if phone in ADMIN_NUMBERS:
             prompt = build_admin_prompt(msg, fleet)
             reply  = get_ai_response(ADMIN_SYSTEM, prompt)
@@ -433,7 +389,6 @@ def webhook():
             prompt = build_customer_prompt(msg, fleet)
             reply  = get_ai_response(CUSTOMER_SYSTEM, prompt)
 
-        # Send reply on same channel message arrived on
         send_whatsapp(phone, reply, incoming_channel)
         return jsonify({"status": "ok"}), 200
 
@@ -443,7 +398,7 @@ def webhook():
 
 
 # ─────────────────────────────────────────────
-# HEALTH CHECK — visit this URL to confirm live
+# HEALTH CHECK
 # ─────────────────────────────────────────────
 
 @app.route("/", methods=["GET"])
@@ -456,11 +411,10 @@ def health():
 
 
 # ─────────────────────────────────────────────
-# LOCAL TEST HELPERS
+# LOCAL TEST
 # ─────────────────────────────────────────────
 
 def run_test():
-    """Run this locally to verify all three data sources before deploying."""
     print("\n=== TEST 1: MKV Pricing ===")
     vehicles = scrape_mkv_pricing()
     for v in vehicles[:5]:
@@ -472,22 +426,21 @@ def run_test():
     out_data  = fetch_appic_data("Out", today, next_week)
     print(f"  Checked out records: {len(out_data)}")
     if out_data:
-        print(f"  Sample record keys: {list(out_data[0].keys())}")
-        print(f"  Sample record: {out_data[0]}")
+        print(f"  Sample: {out_data[0]}")
 
     print("\n=== TEST 3: Appic Check-in ===")
     in_data = fetch_appic_data("In", today, next_week)
     print(f"  Check-in records: {len(in_data)}")
     if in_data:
-        print(f"  Sample record keys: {list(in_data[0].keys())}")
+        print(f"  Sample: {in_data[0]}")
 
     print("\n=== TEST 4: Merged Fleet ===")
     avail  = get_availability_from_appic()
     fleet  = merge_fleet(vehicles, avail)
     avail_count = sum(1 for v in fleet if v["available"])
     print(f"  {avail_count}/{len(fleet)} available")
-    for v in fleet[:5]:
-        print(f"  {v['name']} — {v['status']}")
+    for v in fleet:
+        print(f"  {v['name']} — {v['status']} | AED {v['discounted_price']:,}/day")
 
     print("\n=== ALL TESTS COMPLETE ===\n")
 
