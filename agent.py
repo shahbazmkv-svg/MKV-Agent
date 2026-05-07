@@ -29,8 +29,8 @@ claude                  = anthropic.Anthropic(api_key=os.environ["CLAUDE_API_KEY
 
 # WhatsApp numbers of MKV staff — will receive full admin/operational responses
 ADMIN_NUMBERS = {
-    "+971XXXXXXXXX",   # replace with actual staff numbers
-    "+971YYYYYYYYY",
+    "+971562794545",   # replace with actual staff numbers
+    "+971529409280",
 }
 
 
