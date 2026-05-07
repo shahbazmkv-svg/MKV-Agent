@@ -324,7 +324,7 @@ Staff query: "{msg}"
 def get_ai_response(system, prompt):
     try:
         msg = claude.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=400,
             system=system,
             messages=[{"role": "user", "content": prompt}]
