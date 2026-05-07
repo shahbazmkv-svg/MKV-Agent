@@ -46,38 +46,54 @@ def scrape_mkv_pricing():
         print(f"[scrape_mkv_pricing] ERROR: {e}")
         return []
 
-    soup  = BeautifulSoup(resp.text, "html.parser")
-    cards = soup.select("a[href^='/car/']")
-    print(f"[scrape_mkv_pricing] found {len(cards)} car cards on page")
-
+    soup     = BeautifulSoup(resp.text, "html.parser")
     vehicles = []
-    for card in cards:
-        try:
-            name_el = card.select_one("h5")
-            cat_el  = card.select_one("p")
-            prices  = card.select("h4")
-            disc_el = card.find(string=re.compile(r"\d+%\s*OFF", re.I))
-            slug    = card["href"].replace("/car/", "").strip("/")
 
-            if not name_el or len(prices) < 2:
+    # Each vehicle card has an h5 name and h4 price block
+    # Structure: h5 = name, h4 = "10999 AED7999 AED/ Day" (both prices in one tag)
+    for h5 in soup.select("h5"):
+        try:
+            name = h5.get_text(strip=True)
+            if not name:
                 continue
 
-            def parse_aed(el):
-                return int(re.sub(r"[^\d]", "", el.get_text()))
+            # Category is in the <p> before the h5
+            cat_el = h5.find_previous("p")
+            category = cat_el.get_text(strip=True) if cat_el else "Luxury"
 
-            orig     = parse_aed(prices[0])
-            disc     = parse_aed(prices[1])
-            disc_pct = 0
-            if disc_el:
-                m = re.search(r"(\d+)", disc_el)
-                if m:
-                    disc_pct = int(m.group(1))
-            elif orig > disc:
-                disc_pct = round((orig - disc) / orig * 100)
+            # Price is in the h4 after the h5
+            h4 = h5.find_next("h4")
+            if not h4:
+                continue
+
+            # h4 text looks like: "10999 AED7999 AED/ Day"
+            price_text = h4.get_text(strip=True)
+            nums = re.findall(r"\d+", price_text)
+            if len(nums) < 2:
+                continue
+
+            orig = int(nums[0])
+            disc = int(nums[1])
+
+            if orig <= disc or disc == 0:
+                continue
+
+            disc_pct = round((orig - disc) / orig * 100)
+
+            # Get the car slug from nearest parent <a href="/car/...">
+            parent_a = h5.find_parent("a", href=re.compile(r"^/car/"))
+            if not parent_a:
+                # try finding the Reserve link nearby
+                reserve = h5.find_next("a", href=re.compile(r"^/car/"))
+                if not reserve:
+                    continue
+                slug = reserve["href"].replace("/car/", "").strip("/")
+            else:
+                slug = parent_a["href"].replace("/car/", "").strip("/")
 
             vehicles.append({
-                "name":             name_el.get_text(strip=True),
-                "category":         cat_el.get_text(strip=True) if cat_el else "Luxury",
+                "name":             name,
+                "category":         category,
                 "original_price":   orig,
                 "discounted_price": disc,
                 "discount_pct":     disc_pct,
@@ -85,6 +101,7 @@ def scrape_mkv_pricing():
                 "url":              f"https://www.mkvluxury.com/car/{slug}",
                 "km_included":      200,
             })
+
         except Exception:
             continue
 
