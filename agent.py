@@ -335,6 +335,9 @@ def get_ai_response(system, prompt):
 
 def send_whatsapp(to, body, channel_id):
     try:
+        # Gallabox requires phone without + prefix
+        clean_phone = to.replace("+", "").replace(" ", "").strip()
+
         resp = requests.post(
             "https://server.gallabox.com/devapi/messages/whatsapp",
             headers={
@@ -345,12 +348,15 @@ def send_whatsapp(to, body, channel_id):
             json={
                 "channelId":   channel_id,
                 "channelType": "whatsapp",
-                "recipient":   {"phone": to},
-                "whatsapp":    {"type": "text", "text": {"body": body}}
+                "recipient":   {
+                    "phone": clean_phone,
+                    "name":  "Customer"
+                },
+                "whatsapp": {"type": "text", "text": {"body": body}}
             },
             timeout=8
         )
-        print(f"[send_whatsapp] to={to} channel={channel_id} status={resp.status_code}")
+        print(f"[send_whatsapp] to={clean_phone} channel={channel_id} status={resp.status_code}")
         print(f"[send_whatsapp] response={resp.text}")
     except Exception as e:
         print(f"[send_whatsapp] ERROR: {e}")
