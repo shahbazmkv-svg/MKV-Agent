@@ -27,10 +27,24 @@ GALLABOX_CHANNEL_ORANGE = os.environ["GALLABOX_CHANNEL_ID_Orange"]
 
 claude                  = anthropic.Anthropic(api_key=os.environ["CLAUDE_API_KEY"])
 
+# MKV staff numbers — receive full admin/operational responses
 ADMIN_NUMBERS = {
     "+971562794545",
     "+971529409280",
 }
+
+# Payment keywords that trigger QR code
+PAYMENT_KEYWORDS = [
+    "proceed", "ready to pay", "how to pay", "payment",
+    "pay now", "send qr", "10%", "yes proceed", "confirm payment",
+    "i want to pay", "make payment", "pay deposit"
+]
+
+# QR code — update this URL after uploading to Gallabox or hosting on mkvluxury.com
+QR_CODE_URL = "https://www.mkvluxury.com/qr-payment.jpg"
+
+# Gallabox approved template name for QR payment
+QR_TEMPLATE_NAME = "mkv_payment_qr"
 
 
 # ─────────────────────────────────────────────
@@ -46,7 +60,7 @@ def scrape_mkv_pricing():
         print(f"[scrape_mkv_pricing] ERROR: {e}")
         return []
 
-    soup  = BeautifulSoup(resp.text, "html.parser")
+    soup     = BeautifulSoup(resp.text, "html.parser")
     vehicles = []
 
     for h5 in soup.select("h5"):
@@ -218,17 +232,19 @@ def merge_fleet(mkv_vehicles, appic_avail):
 
 
 # ─────────────────────────────────────────────
-# AI PROMPTS — customer vs admin
+# AI PROMPTS
 # ─────────────────────────────────────────────
 
 CUSTOMER_SYSTEM = """
-You are MKV AI Agent, MKV Luxury's WhatsApp concierge in Dubai.
+You are Layla, MKV Luxury's WhatsApp concierge in Dubai.
 You help customers find and book luxury and supercars.
-
 Personality: warm, professional, aspirational — like a 5-star hotel concierge.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 BOOKING TRIGGER RULE:
-When customer says "book", "reserve", "confirm", "I want to book", "book this", "book urus", or any booking intent — respond with EXACTLY this, no variations:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When customer says "book", "reserve", "confirm", "I want to book", "book this",
+or any booking intent — respond with EXACTLY this message, no variations:
 
 "Perfect! 🚗 The process is simple!
 
@@ -245,8 +261,12 @@ To secure your booking reservation, kindly provide the following:
 
 Reply with your details and we'll get everything arranged! 🌟"
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOCUMENT SUBMISSION RULE:
-When customer shares any of: email address, Emirates ID, passport info, license info, address, or says "here are my details", "sending documents", "what next" after a booking request — respond with EXACTLY this, no variations:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When customer shares email address, Emirates ID, passport info, license info,
+address details, or says "here are my details", "sending documents", "what next",
+"done", "sent" after a booking request — respond with EXACTLY this, no variations:
 
 "Thank you! 🌟 We have received your details.
 
@@ -254,23 +274,41 @@ A reservation specialist will connect with you shortly to process your 10% advan
 
 We look forward to making your luxury experience unforgettable! 🚗✨"
 
-Do NOT suggest more vehicles or ask more questions after documents are submitted.
+Do NOT suggest more vehicles or ask more questions after this message.
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PAYMENT TRIGGER RULE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When customer says "proceed", "ready to pay", "how to pay", "payment",
+"pay now", "10%", "yes proceed", "confirm payment" — respond with EXACTLY this:
+
+"Thank you for confirming! 💳
+
+Please scan the QR code to process your 10% advance payment via Nomod.
+
+Once payment is completed, kindly share the payment confirmation screenshot and our reservation specialist will arrange your vehicle delivery immediately.
+
+MKV Car Rental LLC
+WH 01, Al Quoz 3, Dubai 🇦🇪"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 AVAILABILITY CHECK RULE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 When customer asks about a specific vehicle for specific dates:
-- Check if vehicle is in the AVAILABLE NOW list
-- If AVAILABLE: confirm it is available and give price
-- If NOT AVAILABLE: say when it returns and suggest top 2 alternatives from available list
-- Never confirm availability of a vehicle that is Checked out or returning after requested date
+- If vehicle is in AVAILABLE NOW list: confirm it is available with price
+- If vehicle is NOT AVAILABLE: say when it returns and suggest top 2 alternatives
+- Never confirm a vehicle that is Checked out or returning after requested date
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 GENERAL RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - Always show discounted AED price only (never original)
 - Mention discount % as a selling point
-- Always share the details of the requested car first and ask for dates and number of days to be booked
-- Check availability and proceed, if not available offer 3 closest alternatives - best match first
+- Suggest maximum 3 vehicles per reply — best match first
+- Only suggest available vehicles
 - Mention: zero deposit, door-to-door delivery, 200 km/day, basic insurance included
-- Full insurance is available as a paid add-on — never say full insurance is included
-- Keep replies under 150 words unless it is the booking or document confirmation message
+- Full insurance is available as a paid add-on — NEVER say full insurance is included
+- Keep replies under 150 words unless it is a booking/document/payment message
 - Always end general replies with: "Reserve now at mkvluxury.com or reply to book 🚗"
 - Use 1-2 emojis per message — keep it premium not casual
 """
@@ -307,7 +345,7 @@ def build_customer_prompt(msg, fleet):
         for v in coming_soon[:5]
     ]) or "None"
 
-    return f"""MKV Luxury — live fleet status today:
+    return f"""MKV Luxury — live fleet status today ({date.today()}):
 
 AVAILABLE NOW:
 {avail_lines}
@@ -317,7 +355,7 @@ RETURNING SOON:
 
 Customer WhatsApp message: "{msg}"
 
-Reply as MKV's luxury concierge."""
+Reply as Layla, MKV's luxury concierge."""
 
 
 def build_admin_prompt(msg, fleet):
@@ -346,7 +384,7 @@ Staff query: "{msg}"
 
 
 # ─────────────────────────────────────────────
-# AI CALL — FIXED model name
+# AI CALL
 # ─────────────────────────────────────────────
 
 def get_ai_response(system, prompt):
@@ -360,18 +398,16 @@ def get_ai_response(system, prompt):
         return msg.content[0].text
     except Exception as e:
         print(f"[get_ai_response] ERROR: {e}")
-        return "Sorry, I'm having a technical issue. Please call us at +971 58 665 6085."
+        return "Sorry, I'm having a technical issue. Please call us at +971 56 279 4545."
 
 
 # ─────────────────────────────────────────────
-# GALLABOX SENDER
+# GALLABOX SENDERS
 # ─────────────────────────────────────────────
 
 def send_whatsapp(to, body, channel_id):
     try:
-        # Gallabox requires phone without + prefix
         clean_phone = to.replace("+", "").replace(" ", "").strip()
-
         resp = requests.post(
             "https://server.gallabox.com/devapi/messages/whatsapp",
             headers={
@@ -382,22 +418,89 @@ def send_whatsapp(to, body, channel_id):
             json={
                 "channelId":   channel_id,
                 "channelType": "whatsapp",
-                "recipient":   {
-                    "phone": clean_phone,
-                    "name":  "Customer"
-                },
-                "whatsapp": {"type": "text", "text": {"body": body}}
+                "recipient":   {"phone": clean_phone, "name": "Customer"},
+                "whatsapp":    {"type": "text", "text": {"body": body}}
             },
             timeout=8
         )
-        print(f"[send_whatsapp] to={clean_phone} channel={channel_id} status={resp.status_code}")
+        print(f"[send_whatsapp] to={clean_phone} status={resp.status_code}")
         print(f"[send_whatsapp] response={resp.text}")
     except Exception as e:
         print(f"[send_whatsapp] ERROR: {e}")
 
 
+def send_whatsapp_template(to, channel_id):
+    """Send QR code payment template via Gallabox approved template."""
+    try:
+        clean_phone = to.replace("+", "").replace(" ", "").strip()
+        resp = requests.post(
+            "https://server.gallabox.com/devapi/messages/whatsapp",
+            headers={
+                "apiKey":       GALLABOX_API_KEY,
+                "apiSecret":    GALLABOX_SECRET,
+                "Content-Type": "application/json"
+            },
+            json={
+                "channelId":   channel_id,
+                "channelType": "whatsapp",
+                "recipient":   {"phone": clean_phone, "name": "Customer"},
+                "whatsapp": {
+                    "type": "template",
+                    "template": {
+                        "name":     QR_TEMPLATE_NAME,
+                        "language": {"code": "en"},
+                        "components": [
+                            {
+                                "type": "header",
+                                "parameters": [
+                                    {
+                                        "type":  "image",
+                                        "image": {"link": QR_CODE_URL}
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            },
+            timeout=8
+        )
+        print(f"[send_template] to={clean_phone} status={resp.status_code}")
+        print(f"[send_template] response={resp.text}")
+    except Exception as e:
+        print(f"[send_template] ERROR: {e}")
+
+
+def send_whatsapp_image(to, caption, image_url, channel_id):
+    """Send QR code as image directly (fallback if template not approved yet)."""
+    try:
+        clean_phone = to.replace("+", "").replace(" ", "").strip()
+        resp = requests.post(
+            "https://server.gallabox.com/devapi/messages/whatsapp",
+            headers={
+                "apiKey":       GALLABOX_API_KEY,
+                "apiSecret":    GALLABOX_SECRET,
+                "Content-Type": "application/json"
+            },
+            json={
+                "channelId":   channel_id,
+                "channelType": "whatsapp",
+                "recipient":   {"phone": clean_phone, "name": "Customer"},
+                "whatsapp": {
+                    "type":  "image",
+                    "image": {"url": image_url, "caption": caption}
+                }
+            },
+            timeout=8
+        )
+        print(f"[send_image] to={clean_phone} status={resp.status_code}")
+        print(f"[send_image] response={resp.text}")
+    except Exception as e:
+        print(f"[send_image] ERROR: {e}")
+
+
 # ─────────────────────────────────────────────
-# WEBHOOK — FIXED payload parsing for Gallabox
+# WEBHOOK — main entry point
 # ─────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
@@ -406,18 +509,18 @@ def webhook():
         data = request.json
         print(f"[webhook] payload: {data}")
 
-        # Extract phone — handles Gallabox direct format and flow format
+        # Extract phone number
         phone = (
             data.get("whatsapp", {}).get("from")
+            or data.get("contact", {}).get("phone")
             or data.get("contacts", [{}])[0].get("phone")
             or data.get("from")
             or ""
         )
-        # Ensure phone starts with +
         if phone and not phone.startswith("+"):
             phone = "+" + phone
 
-        # Extract message text — handles Gallabox direct format and flow format
+        # Extract message text
         msg = (
             data.get("whatsapp", {}).get("text", {}).get("body")
             or data.get("messages", [{}])[0].get("text", {}).get("body")
@@ -426,7 +529,7 @@ def webhook():
             or ""
         ).strip()
 
-        # Extract channel ID — use Green channel as default
+        # Extract channel ID
         incoming_channel = (
             data.get("channelId")
             or data.get("channel", {}).get("id")
@@ -447,11 +550,25 @@ def webhook():
         if phone in ADMIN_NUMBERS:
             prompt = build_admin_prompt(msg, fleet)
             reply  = get_ai_response(ADMIN_SYSTEM, prompt)
+            send_whatsapp(phone, reply, incoming_channel)
         else:
             prompt = build_customer_prompt(msg, fleet)
             reply  = get_ai_response(CUSTOMER_SYSTEM, prompt)
 
-        send_whatsapp(phone, reply, incoming_channel)
+            # Check if payment trigger — send text reply + QR code image
+            is_payment = any(kw in msg.lower() for kw in PAYMENT_KEYWORDS)
+
+            send_whatsapp(phone, reply, incoming_channel)
+
+            if is_payment:
+                # Send QR code image after payment confirmation message
+                send_whatsapp_image(
+                    phone,
+                    "Scan to pay — MKV Car Rental LLC 🚗",
+                    QR_CODE_URL,
+                    incoming_channel
+                )
+
         return jsonify({"status": "ok", "message": reply}), 200
 
     except Exception as e:
@@ -468,7 +585,7 @@ def health():
     return jsonify({
         "status":  "MKV AI Agent is running",
         "date":    str(date.today()),
-        "version": "3.0"
+        "version": "4.0"
     }), 200
 
 
