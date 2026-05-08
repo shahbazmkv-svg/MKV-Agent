@@ -16,6 +16,7 @@ app = Flask(__name__)
 # ─────────────────────────────────────────────
 
 MKV_FLEET_URL           = "https://www.mkvluxury.com/cars"
+MKV_CAR_BASE            = "https://www.mkvluxury.com/car"
 
 APPIC_URL               = "https://www.appicfleet.com/appiccar-apis-mkv/get-mkv-checkin-checkout.php"
 APPIC_KEY               = os.environ["APPIC_API_KEY"]
@@ -27,28 +28,23 @@ GALLABOX_CHANNEL_ORANGE = os.environ["GALLABOX_CHANNEL_ID_Orange"]
 
 claude                  = anthropic.Anthropic(api_key=os.environ["CLAUDE_API_KEY"])
 
-# MKV staff numbers — receive full admin/operational responses
 ADMIN_NUMBERS = {
     "+971562794545",
     "+971529409280",
 }
 
-# Payment keywords that trigger QR code
 PAYMENT_KEYWORDS = [
     "proceed", "ready to pay", "how to pay", "payment",
     "pay now", "send qr", "10%", "yes proceed", "confirm payment",
     "i want to pay", "make payment", "pay deposit"
 ]
 
-# QR code — update this URL after uploading to Gallabox or hosting on mkvluxury.com
-QR_CODE_URL = "https://www.mkvluxury.com/qr-payment.jpg"
-
-# Gallabox approved template name for QR payment
+QR_CODE_URL      = "https://raw.githubusercontent.com/shahbazmkv-svg/MKV-Agent/main/Nomod_QR_code.jpeg"
 QR_TEMPLATE_NAME = "mkv_payment_qr"
 
 
 # ─────────────────────────────────────────────
-# SOURCE 1 — PRICING from mkvluxury.com
+# SOURCE 1A — LIST PAGE: slugs + basic pricing
 # ─────────────────────────────────────────────
 
 def scrape_mkv_pricing():
@@ -105,13 +101,100 @@ def scrape_mkv_pricing():
                 "discounted_price": disc,
                 "discount_pct":     disc_pct,
                 "slug":             slug,
-                "url":              f"https://www.mkvluxury.com/car/{slug}",
+                "url":              f"{MKV_CAR_BASE}/{slug}",
                 "km_included":      200,
+                # detailed fields — filled by scrape_vehicle_detail()
+                "weekly_price":     None,
+                "monthly_price":    None,
+                "extra_km_rate":    None,
+                "security_deposit": None,
+                "zero_deposit_fee": None,
+                "total_protect":    None,
+                "rim_tyre":         None,
+                "baby_seat":        None,
+                "specs":            {},
             })
         except Exception:
             continue
 
-    print(f"[scrape_mkv_pricing] {len(vehicles)} vehicles parsed successfully")
+    print(f"[scrape_mkv_pricing] {len(vehicles)} vehicles found on list page")
+    return vehicles
+
+
+# ─────────────────────────────────────────────
+# SOURCE 1B — DETAIL PAGE: full pricing per car
+# ─────────────────────────────────────────────
+
+def scrape_vehicle_detail(slug: str) -> dict:
+    """
+    Scrapes individual car page for detailed pricing:
+    weekly, monthly, extra KM, deposit, add-ons, specs.
+    """
+    url     = f"{MKV_CAR_BASE}/{slug}"
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; MKV-Agent/1.0)"}
+    detail  = {}
+    try:
+        resp = requests.get(url, headers=headers, timeout=8)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        # Weekly price
+        m = re.search(r"([\d,]+)\s*AED\s*/\s*week", text, re.I)
+        if m:
+            detail["weekly_price"] = int(m.group(1).replace(",", ""))
+
+        # Monthly price
+        m = re.search(r"([\d,]+)\s*AED\s*/\s*month", text, re.I)
+        if m:
+            detail["monthly_price"] = int(m.group(1).replace(",", ""))
+
+        # Extra KM rate
+        m = re.search(r"(\d+)\s*AED\s*/\s*[Kk][Mm]", text)
+        if m:
+            detail["extra_km_rate"] = int(m.group(1))
+
+        # Security deposit
+        m = re.search(r"[Dd]eposit[\s\S]{0,30}?AED\s*([\d,]+)", text)
+        if m:
+            detail["security_deposit"] = int(m.group(1).replace(",", ""))
+
+        # Zero deposit fee per day
+        m = re.search(r"[Zz]ero\s*[Dd]eposit[\s\S]{0,50}?AED\s*(\d+)\s*/\s*day", text)
+        if m:
+            detail["zero_deposit_fee"] = int(m.group(1))
+        else:
+            m = re.search(r"[Dd]eposit.free[\s\S]{0,30}?AED\s*(\d+)", text)
+            if m:
+                detail["zero_deposit_fee"] = int(m.group(1))
+
+        # Add-ons
+        detail["total_protect"] = bool(re.search(r"Total Protect", text, re.I))
+        detail["rim_tyre"]      = bool(re.search(r"Rim.{0,5}Tyre", text, re.I))
+        detail["baby_seat"]     = bool(re.search(r"Baby Seat", text, re.I))
+
+        # Included KM
+        m = re.search(r"(\d{3,4})\s*KM\s*/\s*(day|week)", text, re.I)
+        if m:
+            detail["km_included"] = int(m.group(1))
+
+    except Exception as e:
+        print(f"[scrape_vehicle_detail] ERROR {slug}: {e}")
+
+    return detail
+
+
+def enrich_fleet_with_details(vehicles: list) -> list:
+    """
+    Fetch detail page for each vehicle and merge pricing info.
+    Limits to first 20 vehicles to avoid long load times.
+    """
+    for v in vehicles[:20]:
+        detail = scrape_vehicle_detail(v["slug"])
+        for key, val in detail.items():
+            if val is not None:
+                v[key] = val
+    print(f"[enrich_fleet] detail pages fetched for up to 20 vehicles")
     return vehicles
 
 
@@ -133,7 +216,7 @@ def fetch_appic_data(direction, start, end):
         )
         resp.raise_for_status()
         result = resp.json()
-        print(f"[fetch_appic_data] direction={direction} count={result.get('count', '?')}")
+        print(f"[fetch_appic_data] direction={direction} count={result.get('count','?')}")
 
         if isinstance(result, list):
             return result
@@ -189,7 +272,7 @@ def get_availability_from_appic():
 
 
 # ─────────────────────────────────────────────
-# MERGE — combine both sources
+# MERGE — pricing + availability
 # ─────────────────────────────────────────────
 
 def merge_fleet(mkv_vehicles, appic_avail):
@@ -232,6 +315,55 @@ def merge_fleet(mkv_vehicles, appic_avail):
 
 
 # ─────────────────────────────────────────────
+# FORMAT vehicle pricing for prompt
+# ─────────────────────────────────────────────
+
+def format_vehicle_pricing(v: dict) -> str:
+    """
+    Build a rich pricing string for a single vehicle.
+    Only shows daily price + deposit + extra KM by default.
+    Weekly/monthly included so AI can share if asked.
+    """
+    lines = []
+    lines.append(f"Name: {v['name']}")
+    lines.append(f"Category: {v['category']}")
+    lines.append(f"Daily price: AED {v['discounted_price']:,}/day [{v['discount_pct']}% OFF]")
+    lines.append(f"Status: {v['status']}")
+    if v.get("returning_date"):
+        lines.append(f"Returning: {v['returning_date']}")
+    lines.append(f"Included KM: {v.get('km_included', 200)} km/day")
+
+    if v.get("extra_km_rate"):
+        lines.append(f"Extra KM rate: AED {v['extra_km_rate']}/km")
+    else:
+        lines.append("Extra KM rate: AED 40/km (standard)")
+
+    if v.get("zero_deposit_fee"):
+        lines.append(f"Zero deposit option: AED {v['zero_deposit_fee']}/day (no security deposit needed)")
+    if v.get("security_deposit"):
+        lines.append(f"Security deposit: AED {v['security_deposit']:,} (refundable within 21 days)")
+
+    if v.get("weekly_price"):
+        lines.append(f"Weekly price: AED {v['weekly_price']:,}/week")
+    if v.get("monthly_price"):
+        lines.append(f"Monthly price: AED {v['monthly_price']:,}/month")
+
+    addons = []
+    if v.get("total_protect"):
+        addons.append("Total Protection")
+    if v.get("rim_tyre"):
+        addons.append("Rim+Tyre+Windscreen Protection")
+    if v.get("baby_seat"):
+        addons.append("Baby Seat")
+    if addons:
+        lines.append(f"Available add-ons: {', '.join(addons)}")
+
+    lines.append(f"VAT: 5% applied at checkout")
+    lines.append(f"URL: {v['url']}")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
 # AI PROMPTS
 # ─────────────────────────────────────────────
 
@@ -241,28 +373,75 @@ You help customers find and book luxury and supercars.
 Personality: warm, professional, aspirational — like a 5-star hotel concierge.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WELCOME MESSAGE RULE:
+GREETING RULE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When customer sends their very first message ("Hi", "Hello", "Hey", or any greeting),
-respond with EXACTLY this style — vary slightly each time but keep all elements:
+When customer sends a greeting ("Hi", "Hello", "Hey", "Good morning", "Salam" etc),
+respond with EXACTLY this message, word for word:
 
-"Welcome to MKV Luxury! 🌟
+"Greetings from MKV Luxury! 🚗✨ We're excited to assist you and ensure a smooth, unforgettable luxury car rental experience.
 
-I'm Kathy here to help you find the perfect luxury or supercar for your Dubai experience.
-
-Whether you're looking for a Ferrari, Lamborghini, Rolls Royce, or something special — we deliver straight to your door with zero deposit and 200 km daily included.
+I'm Kathy, your personal concierge. Whether you're looking for a Ferrari, Lamborghini, Rolls Royce, or something special — we deliver straight to your door with zero deposit and 200 km daily included.
 
 What type of vehicle interests you today, or would you like to see our top picks?
 
 Reserve now at mkvluxury.com or reply to book 🚗"
 
-Keep it warm, aspirational and under 150 words. Do NOT list specific vehicles or prices in the welcome message.
+Do NOT list prices or specific vehicles in the greeting.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PRICING RULE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When sharing vehicle pricing ALWAYS include:
+- Daily price (discounted AED only, never original)
+- Discount % as a selling point
+- Included KM per day
+- Extra KM rate (AED per km)
+- Deposit options: zero deposit fee per day OR refundable security deposit within 21 days
+- 5% VAT applied at checkout
+- Basic insurance included
+
+Only share weekly/monthly price if customer specifically asks for it.
+Never mention original price — only discounted price.
+
+Example format:
+"McLaren Artura Spider 2025 — AED 999/day [X% OFF]
+✅ 200 km/day included | Extra km: AED 40/km
+💳 Zero deposit: AED 200/day OR Security deposit: AED 5,000 (refundable in 21 days)
+🛡 Basic insurance included | Add-ons: Total Protection, Baby Seat available
++ 5% VAT at checkout
+👉 mkvluxury.com/car/mclaren-artura-spider-2025"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CAR CHOICE CONFIRMATION RULE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When customer confirms a vehicle choice ("I want the Ferrari", "Book the Urus",
+"I'll take the McLaren", "that one", "yes", "perfect", "looks good") —
+respond with EXACTLY this, replacing [CAR NAME] with chosen vehicle:
+
+"Excellent choice! 🌟 The [CAR NAME] is a fantastic pick.
+
+Could you please let us know the date you'd like to book the car and the number of days? This will help us check availability and confirm your reservation right away."
+
+Do NOT ask for documents yet at this stage.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OFFER / FLYER RULE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+When customer shares a promotional image, flyer, or offer screenshot — respond with:
+
+"Thank you for sharing that! 🚗 Great to see you're interested in this offer.
+
+Could you please let us know:
+📅 Your preferred booking date?
+📆 Number of days you'd like to rent?
+
+Once confirmed, I'll check availability and connect you with our reservations team right away!"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 BOOKING TRIGGER RULE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When customer says "book", "reserve", "confirm", "I want to book", "book this",
-or any booking intent — respond with EXACTLY this message, no variations:
+When customer provides dates and number of days AND confirms they want to proceed —
+respond with EXACTLY this, no variations, do NOT suggest other vehicles:
 
 "Perfect! 🚗 The process is simple!
 
@@ -282,23 +461,27 @@ Reply with your details and we'll get everything arranged! 🌟"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DOCUMENT SUBMISSION RULE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-When customer shares email address, Emirates ID, passport info, license info,
-address details, or says "here are my details", "sending documents", "what next",
-"done", "sent" after a booking request — respond with EXACTLY this, no variations:
+When customer shares ANY of the following after a booking request:
+- Email address (contains @ symbol)
+- Location / address ("Dubai", "UK", "Abu Dhabi", any city or country)
+- ID, passport, or license details
+- Sends an image or photo
+- Says "done", "sent", "here", "check", "what next", "ok"
+
+Respond with EXACTLY this — do NOT restart, do NOT suggest vehicles, do NOT ask questions:
 
 "Thank you! 🌟 We have received your details.
 
-A reservation specialist will connect with you shortly to process your 10% advance payment and arrange delivery of your vehicle.
+A reservation specialist will connect with you shortly to process your 10% advance payment via Nomod and arrange delivery of your vehicle.
 
 We look forward to making your luxury experience unforgettable! 🚗✨"
-
-Do NOT suggest more vehicles or ask more questions after this message.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PAYMENT TRIGGER RULE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 When customer says "proceed", "ready to pay", "how to pay", "payment",
-"pay now", "10%", "yes proceed", "confirm payment" — respond with EXACTLY this:
+"pay now", "10%", "yes proceed", "confirm payment", "send payment link" —
+respond with EXACTLY this:
 
 "Thank you for confirming! 💳
 
@@ -313,22 +496,25 @@ WH 01, Al Quoz 3, Dubai 🇦🇪"
 AVAILABILITY CHECK RULE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 When customer asks about a specific vehicle for specific dates:
-- If vehicle is in AVAILABLE NOW list: confirm it is available with price
-- If vehicle is NOT AVAILABLE: say when it returns and suggest top 2 alternatives
-- Never confirm a vehicle that is Checked out or returning after requested date
+- If vehicle is in AVAILABLE NOW list → confirm available + share full pricing
+- If NOT AVAILABLE → say when it returns + suggest top 2 alternatives with pricing
+- Never confirm a vehicle that shows as Checked out
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 GENERAL RULES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-- Always show discounted AED price only (never original)
+- Always show discounted AED daily price only (never original price)
 - Mention discount % as a selling point
 - Suggest maximum 3 vehicles per reply — best match first
 - Only suggest available vehicles
-- Mention: zero deposit, door-to-door delivery, 200 km/day, basic insurance included
-- Full insurance is available as a paid add-on — NEVER say full insurance is included
-- Keep replies under 150 words unless it is a booking/document/payment message
+- Basic insurance included with every rental
+- Full insurance / Total Protection is a paid add-on — NEVER say full insurance is free
+- Keep replies under 160 words unless it is a booking/document/payment message
 - Always end general replies with: "Reserve now at mkvluxury.com or reply to book 🚗"
 - Use 1-2 emojis per message — keep it premium not casual
+- NEVER restart the greeting mid-conversation
+- NEVER offer new vehicle choices after customer has started booking process
+- NEVER repeat the welcome message if conversation is already ongoing
 """
 
 ADMIN_SYSTEM = """
@@ -336,14 +522,17 @@ You are MKV Luxury's internal fleet intelligence assistant.
 Provide complete operational data for staff queries.
 
 For each vehicle include:
-- Full name and category
+- Full name, category, slug/URL
 - Original price vs discounted price (AED) + discount %
+- Weekly and monthly rates if available
 - Availability status and returning date
-- Revenue opportunity (discounted price x available units if known)
+- Security deposit and zero deposit fee
+- Extra KM rate
+- Revenue opportunity: daily price x available units
 - Flag any vehicle checked out with no return date
 
 Format as a clean operational report. Be precise and data-driven.
-Pricing source: mkvluxury.com (live)
+Pricing source: mkvluxury.com (live scrape including detail pages)
 Availability source: Appic Fleet API (live)
 """
 
@@ -352,9 +541,8 @@ def build_customer_prompt(msg, fleet):
     available   = [v for v in fleet if v["available"]]
     coming_soon = [v for v in fleet if not v["available"] and v.get("returning_date")]
 
-    avail_lines = "\n".join([
-        f"- {v['name']} ({v['category']}): AED {v['discounted_price']:,}/day "
-        f"[{v['discount_pct']}% OFF] — {v['url']}"
+    avail_lines = "\n\n".join([
+        format_vehicle_pricing(v)
         for v in available
     ]) or "No vehicles currently available"
 
@@ -373,16 +561,18 @@ RETURNING SOON:
 
 Customer WhatsApp message: "{msg}"
 
-Reply as Kathy, MKV's luxury concierge."""
+Reply as Kathy, MKV's luxury concierge. Follow all rules strictly."""
 
 
 def build_admin_prompt(msg, fleet):
     lines = "\n".join([
         f"- {v['name']} | {v['category']} | "
-        f"Original: AED {v['original_price']:,} -> Discounted: AED {v['discounted_price']:,} "
-        f"({v['discount_pct']}% OFF) | "
-        f"Status: {v['status']} | "
-        f"Returning: {v['returning_date'] or 'N/A'} | "
+        f"AED {v['original_price']:,} -> AED {v['discounted_price']:,} ({v['discount_pct']}% OFF) | "
+        f"Weekly: AED {v.get('weekly_price','N/A')} | Monthly: AED {v.get('monthly_price','N/A')} | "
+        f"Extra KM: AED {v.get('extra_km_rate','40')}/km | "
+        f"Zero deposit fee: AED {v.get('zero_deposit_fee','N/A')}/day | "
+        f"Security deposit: AED {v.get('security_deposit','N/A')} | "
+        f"Status: {v['status']} | Returning: {v['returning_date'] or 'N/A'} | "
         f"Link: {v['url']}"
         for v in fleet
     ])
@@ -391,7 +581,7 @@ def build_admin_prompt(msg, fleet):
     total           = len(fleet)
 
     return f"""MKV Fleet Snapshot — {date.today()}
-Pricing: mkvluxury.com (live scrape)
+Pricing: mkvluxury.com (live scrape + detail pages)
 Availability: Appic Fleet API (live)
 Summary: {available_count} available / {total} total vehicles
 
@@ -409,7 +599,7 @@ def get_ai_response(system, prompt):
     try:
         msg = claude.messages.create(
             model="claude-sonnet-4-5",
-            max_tokens=400,
+            max_tokens=500,
             system=system,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -447,50 +637,7 @@ def send_whatsapp(to, body, channel_id):
         print(f"[send_whatsapp] ERROR: {e}")
 
 
-def send_whatsapp_template(to, channel_id):
-    """Send QR code payment template via Gallabox approved template."""
-    try:
-        clean_phone = to.replace("+", "").replace(" ", "").strip()
-        resp = requests.post(
-            "https://server.gallabox.com/devapi/messages/whatsapp",
-            headers={
-                "apiKey":       GALLABOX_API_KEY,
-                "apiSecret":    GALLABOX_SECRET,
-                "Content-Type": "application/json"
-            },
-            json={
-                "channelId":   channel_id,
-                "channelType": "whatsapp",
-                "recipient":   {"phone": clean_phone, "name": "Customer"},
-                "whatsapp": {
-                    "type": "template",
-                    "template": {
-                        "name":     QR_TEMPLATE_NAME,
-                        "language": {"code": "en"},
-                        "components": [
-                            {
-                                "type": "header",
-                                "parameters": [
-                                    {
-                                        "type":  "image",
-                                        "image": {"link": QR_CODE_URL}
-                                    }
-                                ]
-                            }
-                        ]
-                    }
-                }
-            },
-            timeout=8
-        )
-        print(f"[send_template] to={clean_phone} status={resp.status_code}")
-        print(f"[send_template] response={resp.text}")
-    except Exception as e:
-        print(f"[send_template] ERROR: {e}")
-
-
 def send_whatsapp_image(to, caption, image_url, channel_id):
-    """Send QR code as image directly (fallback if template not approved yet)."""
     try:
         clean_phone = to.replace("+", "").replace(" ", "").strip()
         resp = requests.post(
@@ -518,7 +665,7 @@ def send_whatsapp_image(to, caption, image_url, channel_id):
 
 
 # ─────────────────────────────────────────────
-# WEBHOOK — main entry point
+# WEBHOOK
 # ─────────────────────────────────────────────
 
 @app.route("/webhook", methods=["POST"])
@@ -527,7 +674,6 @@ def webhook():
         data = request.json
         print(f"[webhook] payload: {data}")
 
-        # Extract phone number
         phone = (
             data.get("whatsapp", {}).get("from")
             or data.get("contact", {}).get("phone")
@@ -538,7 +684,6 @@ def webhook():
         if phone and not phone.startswith("+"):
             phone = "+" + phone
 
-        # Extract message text
         msg = (
             data.get("whatsapp", {}).get("text", {}).get("body")
             or data.get("messages", [{}])[0].get("text", {}).get("body")
@@ -547,7 +692,6 @@ def webhook():
             or ""
         ).strip()
 
-        # Extract channel ID
         incoming_channel = (
             data.get("channelId")
             or data.get("channel", {}).get("id")
@@ -561,6 +705,7 @@ def webhook():
 
         # Pull live data
         mkv_vehicles = scrape_mkv_pricing()
+        mkv_vehicles = enrich_fleet_with_details(mkv_vehicles)
         appic_avail  = get_availability_from_appic()
         fleet        = merge_fleet(mkv_vehicles, appic_avail)
 
@@ -573,16 +718,13 @@ def webhook():
             prompt = build_customer_prompt(msg, fleet)
             reply  = get_ai_response(CUSTOMER_SYSTEM, prompt)
 
-            # Check if payment trigger — send text reply + QR code image
             is_payment = any(kw in msg.lower() for kw in PAYMENT_KEYWORDS)
-
             send_whatsapp(phone, reply, incoming_channel)
 
             if is_payment:
-                # Send QR code image after payment confirmation message
                 send_whatsapp_image(
                     phone,
-                    "Scan to pay — MKV Car Rental LLC 🚗",
+                    "Scan to pay your 10% advance — MKV Car Rental LLC 🚗",
                     QR_CODE_URL,
                     incoming_channel
                 )
@@ -601,9 +743,9 @@ def webhook():
 @app.route("/", methods=["GET"])
 def health():
     return jsonify({
-        "status":  "MKV AI Agent is running",
+        "status":  "MKV AI Agent — Kathy is running",
         "date":    str(date.today()),
-        "version": "4.0"
+        "version": "5.0"
     }), 200
 
 
@@ -612,32 +754,36 @@ def health():
 # ─────────────────────────────────────────────
 
 def run_test():
-    print("\n=== TEST 1: MKV Pricing ===")
+    print("\n=== TEST 1: MKV List Pricing ===")
     vehicles = scrape_mkv_pricing()
-    for v in vehicles[:5]:
+    print(f"  {len(vehicles)} vehicles found")
+    for v in vehicles[:3]:
         print(f"  {v['name']} | AED {v['discounted_price']:,}/day | {v['discount_pct']}% OFF")
 
-    print("\n=== TEST 2: Appic Checkout ===")
+    print("\n=== TEST 2: MKV Detail Page (first vehicle) ===")
+    if vehicles:
+        detail = scrape_vehicle_detail(vehicles[0]["slug"])
+        print(f"  Slug: {vehicles[0]['slug']}")
+        print(f"  Detail data: {detail}")
+
+    print("\n=== TEST 3: Appic Checkout ===")
     today     = date.today().strftime("%Y-%m-%d")
     next_week = (date.today() + timedelta(days=7)).strftime("%Y-%m-%d")
     out_data  = fetch_appic_data("Out", today, next_week)
-    print(f"  Checked out records: {len(out_data)}")
-    if out_data:
-        print(f"  Sample: {out_data[0]}")
+    print(f"  Checked out: {len(out_data)} records")
 
-    print("\n=== TEST 3: Appic Check-in ===")
+    print("\n=== TEST 4: Appic Check-in ===")
     in_data = fetch_appic_data("In", today, next_week)
-    print(f"  Check-in records: {len(in_data)}")
-    if in_data:
-        print(f"  Sample: {in_data[0]}")
+    print(f"  Check-in: {len(in_data)} records")
 
-    print("\n=== TEST 4: Merged Fleet ===")
-    avail  = get_availability_from_appic()
-    fleet  = merge_fleet(vehicles, avail)
+    print("\n=== TEST 5: Full Merged Fleet ===")
+    vehicles = enrich_fleet_with_details(vehicles)
+    avail    = get_availability_from_appic()
+    fleet    = merge_fleet(vehicles, avail)
     avail_count = sum(1 for v in fleet if v["available"])
     print(f"  {avail_count}/{len(fleet)} available")
-    for v in fleet:
-        print(f"  {v['name']} — {v['status']} | AED {v['discounted_price']:,}/day")
+    for v in fleet[:3]:
+        print(f"\n  {format_vehicle_pricing(v)}")
 
     print("\n=== ALL TESTS COMPLETE ===\n")
 
