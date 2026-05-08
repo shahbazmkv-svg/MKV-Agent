@@ -236,7 +236,7 @@ def merge_fleet(mkv_vehicles, appic_avail):
 # ─────────────────────────────────────────────
 
 CUSTOMER_SYSTEM = """
-You are Layla, MKV Luxury's WhatsApp concierge in Dubai.
+You are Kathy, MKV Luxury's WhatsApp concierge in Dubai.
 You help customers find and book luxury and supercars.
 Personality: warm, professional, aspirational — like a 5-star hotel concierge.
 
@@ -355,7 +355,7 @@ RETURNING SOON:
 
 Customer WhatsApp message: "{msg}"
 
-Reply as Layla, MKV's luxury concierge."""
+Reply as Kathy, MKV's luxury concierge."""
 
 
 def build_admin_prompt(msg, fleet):
