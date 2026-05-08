@@ -39,9 +39,15 @@ PAYMENT_KEYWORDS = [
     "i want to pay", "make payment", "pay deposit",
 ]
 
+BOOKING_KEYWORDS = [
+    "book", "reserve", "confirm", "i want to book", "book this",
+    "book on", "reserve for", "i'll take", "i want the", "take this",
+    "proceed with", "go ahead", "yes book", "book it",
+]
+
 DETAIL_KEYWORDS = [
-    "price", "cost", "how much", "deposit", "km",
-    "week", "month", "vat", "insurance", "baby", "protect",
+    "extra km", "add-on", "addon", "baby seat", "protect",
+    "weekly", "monthly", "per week", "per month",
 ]
 
 QR_CODE_URL = "https://raw.githubusercontent.com/shahbazmkv-svg/MKV-Agent/main/Nomod_QR_code.jpeg"
@@ -302,10 +308,10 @@ def merge_fleet(mkv_vehicles, appic_avail):
 
 
 # ─────────────────────────────────────────────
-# FORMAT vehicle for prompt
+# FORMAT vehicle for prompt — clean, no extra km or addons by default
 # ─────────────────────────────────────────────
 
-def format_vehicle_pricing(v):
+def format_vehicle_pricing(v, show_details=False):
     lines = []
     lines.append(f"Name: {v['name']}")
     lines.append(f"Category: {v['category']}")
@@ -315,30 +321,30 @@ def format_vehicle_pricing(v):
         lines.append(f"Returning: {v['returning_date']}")
     lines.append(f"Included KM: {v.get('km_included', 200)} km/day")
 
-    if v.get("extra_km_rate"):
-        lines.append(f"Extra KM rate: AED {v['extra_km_rate']}/km")
-    else:
-        lines.append("Extra KM rate: AED 40/km (standard)")
-
     if v.get("zero_deposit_fee"):
         lines.append(f"Zero deposit option: AED {v['zero_deposit_fee']}/day")
     if v.get("security_deposit"):
         lines.append(f"Security deposit: AED {v['security_deposit']:,} (refundable within 21 days)")
 
-    if v.get("weekly_price"):
-        lines.append(f"Weekly price: AED {v['weekly_price']:,}/week")
-    if v.get("monthly_price"):
-        lines.append(f"Monthly price: AED {v['monthly_price']:,}/month")
-
-    addons = []
-    if v.get("total_protect"):
-        addons.append("Total Protection")
-    if v.get("rim_tyre"):
-        addons.append("Rim+Tyre+Windscreen Protection")
-    if v.get("baby_seat"):
-        addons.append("Baby Seat")
-    if addons:
-        lines.append(f"Add-ons available: {', '.join(addons)}")
+    # Only show extra KM and add-ons if explicitly requested
+    if show_details:
+        if v.get("extra_km_rate"):
+            lines.append(f"Extra KM rate: AED {v['extra_km_rate']}/km")
+        else:
+            lines.append("Extra KM rate: AED 40/km")
+        if v.get("weekly_price"):
+            lines.append(f"Weekly price: AED {v['weekly_price']:,}/week")
+        if v.get("monthly_price"):
+            lines.append(f"Monthly price: AED {v['monthly_price']:,}/month")
+        addons = []
+        if v.get("total_protect"):
+            addons.append("Total Protection")
+        if v.get("rim_tyre"):
+            addons.append("Rim+Tyre+Windscreen Protection")
+        if v.get("baby_seat"):
+            addons.append("Baby Seat")
+        if addons:
+            lines.append(f"Add-ons available: {', '.join(addons)}")
 
     lines.append("VAT: 5% applied at checkout")
     lines.append(f"URL: {v['url']}")
@@ -369,24 +375,23 @@ Reserve now at mkvluxury.com or reply to book 🚗"
 Do NOT list prices or specific vehicles in the greeting.
 
 PRICING RULE:
-When sharing vehicle pricing ALWAYS include:
+When sharing vehicle pricing include:
 - Daily price (discounted AED only, never original)
 - Discount % as a selling point
 - Included KM per day
-- Extra KM rate (AED per km)
 - Deposit options: zero deposit fee per day OR refundable security deposit within 21 days
 - 5% VAT applied at checkout
 - Basic insurance included
 
+Do NOT mention extra KM rate or add-ons unless customer specifically asks.
 Only share weekly/monthly price if customer specifically asks for it.
 Never mention original price.
 
 Example format:
-"McLaren Artura Spider 2025 — AED 999/day [X% OFF]
-200 km/day included | Extra km: AED 40/km
+"McLaren Artura Spider 2025 — AED 999/day [23% OFF]
+200 km/day included
 Zero deposit: AED 200/day OR Security deposit: AED 5,000 (refundable in 21 days)
-Basic insurance included | Add-ons: Total Protection, Baby Seat available
-+ 5% VAT at checkout
+Basic insurance included | + 5% VAT at checkout
 mkvluxury.com/car/mclaren-artura-spider-2025"
 
 CAR CHOICE CONFIRMATION RULE:
@@ -412,23 +417,26 @@ Number of days you'd like to rent?
 Once confirmed, I'll check availability and connect you with our reservations team right away!"
 
 BOOKING TRIGGER RULE:
-When customer provides dates and number of days AND confirms they want to proceed
-respond with EXACTLY this, no variations, do NOT suggest other vehicles:
+When customer provides dates and number of days AND confirms they want to proceed —
+respond with EXACTLY this, no variations, do NOT suggest other vehicles,
+do NOT add anything extra:
 
 "Perfect! 🚗 The process is simple!
 
 To secure your booking reservation, kindly provide the following:
 
-1. Driver's license (front and back)
-2. Passport and stamp page OR Emirates ID (front and back)
-3. Home country address
-4. Local UAE address
-5. Email ID
-6. WhatsApp / alternative number
+1️⃣ Driver's license (front & back)
+2️⃣ Passport + stamp page OR Emirates ID (front & back)
+3️⃣ Home country address
+4️⃣ Local UAE address
+5️⃣ Email ID
+6️⃣ WhatsApp / alternative number
 
-A minimum 10% advance payment is required to confirm your booking. The remaining balance is settled upon delivery. Extensions must be paid on the same day — no credit extensions.
+💳 A minimum 10% advance payment is required to confirm your booking. The remaining balance is settled upon delivery. Extensions must be paid on the same day — no credit extensions.
 
-Reply with your details and we'll get everything arranged!"
+Reply with your details and we'll get everything arranged! 🌟"
+
+After sending this message, the system will automatically send the Nomod QR code for payment.
 
 DOCUMENT SUBMISSION RULE:
 When customer shares ANY of the following after a booking request:
@@ -438,7 +446,7 @@ When customer shares ANY of the following after a booking request:
 - Sends an image or photo
 - Says done, sent, here, check, what next, ok
 
-Respond with EXACTLY this, do NOT restart, do NOT suggest vehicles, do NOT ask questions:
+Respond with EXACTLY this — do NOT restart, do NOT suggest vehicles, do NOT ask questions:
 
 "Thank you! 🌟 We have received your details.
 
@@ -457,11 +465,11 @@ Please scan the QR code to process your 10% advance payment via Nomod.
 Once payment is completed, kindly share the payment confirmation screenshot and our reservation specialist will arrange your vehicle delivery immediately.
 
 MKV Car Rental LLC
-WH 01, Al Quoz 3, Dubai"
+
 
 AVAILABILITY CHECK RULE:
 When customer asks about a specific vehicle for specific dates:
-- If vehicle is in AVAILABLE NOW list confirm available and share full pricing
+- If vehicle is in AVAILABLE NOW list confirm available and share pricing
 - If NOT AVAILABLE say when it returns and suggest top 2 alternatives with pricing
 - Never confirm a vehicle that shows as Checked out
 
@@ -471,10 +479,11 @@ GENERAL RULES:
 - Suggest maximum 3 vehicles per reply, best match first
 - Only suggest available vehicles
 - Basic insurance included with every rental
-- Full insurance and Total Protection is a paid add-on, NEVER say full insurance is free
+- Full insurance and Total Protection is a paid add-on — NEVER say full insurance is free
+- Do NOT mention extra KM charges or add-ons unless customer asks
 - Keep replies under 160 words unless it is a booking or document or payment message
-- Always end general replies with: Reserve now at mkvluxury.com or reply to book
-- Use 1-2 emojis per message, keep it premium not casual
+- Always end general replies with: Reserve now at mkvluxury.com or reply to book 🚗
+- Use 1-2 emojis per message — keep it premium not casual
 - NEVER restart the greeting mid-conversation
 - NEVER offer new vehicle choices after customer has started booking process
 - NEVER repeat the welcome message if conversation is already ongoing
@@ -500,12 +509,12 @@ Availability source: Appic Fleet API (live)
 """
 
 
-def build_customer_prompt(msg, fleet):
+def build_customer_prompt(msg, fleet, show_details=False):
     available   = [v for v in fleet if v["available"]]
     coming_soon = [v for v in fleet if not v["available"] and v.get("returning_date")]
 
     avail_lines = "\n\n".join([
-        format_vehicle_pricing(v) for v in available
+        format_vehicle_pricing(v, show_details=show_details) for v in available
     ]) or "No vehicles currently available"
 
     soon_lines = "\n".join([
@@ -662,15 +671,20 @@ def webhook():
         if not phone or not msg:
             return jsonify({"status": "ignored", "reason": "no phone or message"}), 200
 
+        msg_lower = msg.lower()
+
+        # Check what kind of message this is
+        is_booking  = any(kw in msg_lower for kw in BOOKING_KEYWORDS)
+        is_payment  = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
+        is_detail   = any(kw in msg_lower for kw in DETAIL_KEYWORDS)
+
         # Pull live pricing and availability
         mkv_vehicles = scrape_mkv_pricing()
         appic_avail  = get_availability_from_appic()
         fleet        = merge_fleet(mkv_vehicles, appic_avail)
 
-        # Only fetch detail pages when customer asks pricing-related questions
-        msg_lower = msg.lower()
-        needs_detail = any(kw in msg_lower for kw in DETAIL_KEYWORDS)
-        if needs_detail:
+        # Enrich with detail pages only if customer asks for specific details
+        if is_detail:
             fleet = enrich_fleet_with_details(fleet)
 
         # Route by caller type
@@ -679,16 +693,15 @@ def webhook():
             reply  = get_ai_response(ADMIN_SYSTEM, prompt)
             send_whatsapp(phone, reply, incoming_channel)
         else:
-            prompt = build_customer_prompt(msg, fleet)
+            prompt = build_customer_prompt(msg, fleet, show_details=is_detail)
             reply  = get_ai_response(CUSTOMER_SYSTEM, prompt)
-
-            is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
             send_whatsapp(phone, reply, incoming_channel)
 
-            if is_payment:
+            # Send QR code after booking trigger or payment trigger
+            if is_booking or is_payment:
                 send_whatsapp_image(
                     phone,
-                    "Scan to pay your 10% advance — MKV Car Rental LLC",
+                    "Scan to pay your 10% advance — MKV Car Rental LLC 🚗",
                     QR_CODE_URL,
                     incoming_channel,
                 )
@@ -709,7 +722,7 @@ def health():
     return jsonify({
         "status":  "MKV AI Agent — Kathy is running",
         "date":    str(date.today()),
-        "version": "5.1",
+        "version": "5.2",
     }), 200
 
 
