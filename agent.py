@@ -705,9 +705,13 @@ def webhook():
 
         # Pull live data
         mkv_vehicles = scrape_mkv_pricing()
-        mkv_vehicles = enrich_fleet_with_details(mkv_vehicles)
         appic_avail  = get_availability_from_appic()
         fleet        = merge_fleet(mkv_vehicles, appic_avail)
+	# Only enrich with detail pricing if customer asks about specific vehicle
+	detail_keywords = ["price", "cost", "how much", "deposit", "km", "week", 
+					"month", "vat", "insurance", "baby", "protect"]
+	if any(kw in msg.lower() for kw in detail_keywords):
+	fleet = enrich_fleet_with_details(fleet)
 
         # Route by caller type
         if phone in ADMIN_NUMBERS:
