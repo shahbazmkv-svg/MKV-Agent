@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 import anthropic
 from datetime import date, timedelta
@@ -47,10 +48,41 @@ BOOKING_KEYWORDS = [
 
 DETAIL_KEYWORDS = [
     "extra km", "add-on", "addon", "baby seat", "protect",
-    "weekly", "monthly", "per week", "per month",
+    "weekly", "monthly", "per week", "per month", "how much",
+    "price", "cost", "deposit",
 ]
 
 QR_CODE_URL = "https://raw.githubusercontent.com/shahbazmkv-svg/MKV-Agent/main/Nomod_QR_code.jpeg"
+
+# Brand-only words — must NOT match alone, need model word overlap
+BRAND_ONLY_WORDS = {
+    "FERRARI", "MERCEDES", "PORSCHE", "AUDI", "BMW", "LAMBORGHINI",
+    "BENTLEY", "ROLLS", "ROYCE", "RANGE", "ROVER", "LAND", "FORD",
+    "TOYOTA", "NISSAN", "CHEVROLET", "CADILLAC", "LEXUS", "JEEP",
+    "MCLAREN", "LOTUS", "MORGAN", "ASTON", "MARTIN", "BENZ", "AMG",
+}
+
+# ─────────────────────────────────────────────
+# CACHE — avoids re-fetching MKV on every message
+# ─────────────────────────────────────────────
+
+_cache = {
+    "vehicles":   [],
+    "fetched_at": 0,
+}
+CACHE_TTL = 600  # 10 minutes
+
+
+def get_cached_vehicles():
+    now = time.time()
+    if now - _cache["fetched_at"] > CACHE_TTL or not _cache["vehicles"]:
+        vehicles = scrape_mkv_pricing()
+        _cache["vehicles"]   = vehicles
+        _cache["fetched_at"] = now
+        print(f"[cache] refreshed — {len(vehicles)} vehicles")
+    else:
+        print(f"[cache] using cached — {len(_cache['vehicles'])} vehicles")
+    return _cache["vehicles"]
 
 
 # ─────────────────────────────────────────────
@@ -68,42 +100,42 @@ def scrape_mkv_pricing():
 
     soup     = BeautifulSoup(resp.text, "html.parser")
     vehicles = []
+    seen     = set()
 
-    for h5 in soup.select("h5"):
+    for card in soup.select("a[href^='/car/']"):
         try:
-            name = h5.get_text(strip=True)
-            if not name:
+            slug = card["href"].replace("/car/", "").strip("/")
+            if not slug or slug in seen:
                 continue
 
-            cat_el   = h5.find_previous("p")
+            name_el = card.select_one("h5")
+            if not name_el:
+                continue
+
+            name = name_el.get_text(strip=True)
+            if not name or len(name) < 3:
+                continue
+
+            cat_el   = card.select_one("p")
             category = cat_el.get_text(strip=True) if cat_el else "Luxury"
 
-            h4 = h5.find_next("h4")
-            if not h4:
+            # Prices strictly inside this card
+            h4s = card.select("h4")
+            if len(h4s) < 2:
                 continue
 
-            price_text = h4.get_text(strip=True)
-            nums = re.findall(r"\d+", price_text)
-            if len(nums) < 2:
-                continue
+            def parse_aed(el):
+                return int(re.sub(r"[^\d]", "", el.get_text()))
 
-            orig = int(nums[0])
-            disc = int(nums[1])
+            orig = parse_aed(h4s[0])
+            disc = parse_aed(h4s[1])
 
-            if orig <= disc or disc == 0:
+            if orig <= 0 or disc <= 0 or orig <= disc:
                 continue
 
             disc_pct = round((orig - disc) / orig * 100)
 
-            parent_a = h5.find_parent("a", href=re.compile(r"^/car/"))
-            if not parent_a:
-                reserve = h5.find_next("a", href=re.compile(r"^/car/"))
-                if not reserve:
-                    continue
-                slug = reserve["href"].replace("/car/", "").strip("/")
-            else:
-                slug = parent_a["href"].replace("/car/", "").strip("/")
-
+            seen.add(slug)
             vehicles.append({
                 "name":             name,
                 "category":         category,
@@ -118,6 +150,7 @@ def scrape_mkv_pricing():
                 "extra_km_rate":    None,
                 "security_deposit": None,
                 "zero_deposit_fee": None,
+                "baby_seat_price":  None,
                 "total_protect":    None,
                 "rim_tyre":         None,
                 "baby_seat":        None,
@@ -166,6 +199,10 @@ def scrape_vehicle_detail(slug):
             m = re.search(r"[Dd]eposit.free[\s\S]{0,30}?AED\s*(\d+)", text)
             if m:
                 detail["zero_deposit_fee"] = int(m.group(1))
+
+        m = re.search(r"[Bb]aby\s*[Ss]eat[\s\S]{0,30}?AED\s*(\d+)", text)
+        if m:
+            detail["baby_seat_price"] = int(m.group(1))
 
         detail["total_protect"] = bool(re.search(r"Total Protect", text, re.I))
         detail["rim_tyre"]      = bool(re.search(r"Rim.{0,5}Tyre", text, re.I))
@@ -265,36 +302,51 @@ def get_availability_from_appic():
 
 
 # ─────────────────────────────────────────────
-# MERGE
+# MERGE — strict model-word matching only
 # ─────────────────────────────────────────────
 
 def merge_fleet(mkv_vehicles, appic_avail):
-    skip_words = {"the", "and", "for", "2024", "2025", "2026"}
+    skip_words = {"the", "and", "for", "2024", "2025", "2026", "new"}
     merged     = []
 
     for v in mkv_vehicles:
         name_upper = v["name"].upper().strip()
         mkv_words  = set(
             w for w in name_upper.split()
-            if len(w) > 3 and w.lower() not in skip_words
+            if len(w) > 2 and w.lower() not in skip_words
         )
+        # Model-specific words only — strip brand names completely
+        mkv_model  = mkv_words - BRAND_ONLY_WORDS
+
         avail_data = None
+        best_score = 0
+        best_appic = ""
 
         for appic_name, a in appic_avail.items():
+            appic_upper = appic_name.upper()
             appic_words = set(
-                w for w in appic_name.upper().split()
-                if len(w) > 3 and w.lower() not in skip_words
+                w for w in appic_upper.split()
+                if len(w) > 2 and w.lower() not in skip_words
             )
-            overlap = mkv_words & appic_words
-            if len(overlap) >= 2 or (len(overlap) == 1 and len(mkv_words) <= 2):
-                avail_data = a
-                print(f"[merge] MATCHED '{v['name']}' -> '{appic_name}' via {overlap}")
-                break
+            appic_model = appic_words - BRAND_ONLY_WORDS
 
-        if avail_data:
+            # STRICT: brand words alone never trigger a match
+            # Only model-specific words count
+            model_overlap = mkv_model & appic_model
+            if not model_overlap:
+                continue
+
+            score = len(model_overlap)
+            if score > best_score:
+                best_score = score
+                avail_data = a
+                best_appic = appic_name
+
+        if avail_data and best_score >= 1:
             v["available"]      = avail_data["available"]
             v["status"]         = avail_data["status"]
             v["returning_date"] = avail_data["returning_date"]
+            print(f"[merge] MATCHED '{v['name']}' -> '{best_appic}'")
         else:
             v["available"]      = True
             v["status"]         = "Available"
@@ -308,7 +360,7 @@ def merge_fleet(mkv_vehicles, appic_avail):
 
 
 # ─────────────────────────────────────────────
-# FORMAT vehicle for prompt — clean, no extra km or addons by default
+# FORMAT vehicle for prompt
 # ─────────────────────────────────────────────
 
 def format_vehicle_pricing(v, show_details=False):
@@ -326,7 +378,6 @@ def format_vehicle_pricing(v, show_details=False):
     if v.get("security_deposit"):
         lines.append(f"Security deposit: AED {v['security_deposit']:,} (refundable within 21 days)")
 
-    # Only show extra KM and add-ons if explicitly requested
     if show_details:
         if v.get("extra_km_rate"):
             lines.append(f"Extra KM rate: AED {v['extra_km_rate']}/km")
@@ -338,16 +389,19 @@ def format_vehicle_pricing(v, show_details=False):
             lines.append(f"Monthly price: AED {v['monthly_price']:,}/month")
         addons = []
         if v.get("total_protect"):
-            addons.append("Total Protection")
+            addons.append("Total Protection (paid add-on)")
         if v.get("rim_tyre"):
-            addons.append("Rim+Tyre+Windscreen Protection")
+            addons.append("Rim+Tyre+Windscreen Protection (paid add-on)")
         if v.get("baby_seat"):
-            addons.append("Baby Seat")
+            price = v.get("baby_seat_price")
+            if price:
+                addons.append(f"Baby Seat — AED {price}/day")
+            else:
+                addons.append("Baby Seat (paid add-on — team will confirm rate)")
         if addons:
-            lines.append(f"Add-ons available: {', '.join(addons)}")
+            lines.append(f"Paid add-ons: {', '.join(addons)}")
 
     lines.append("VAT: 5% applied at checkout")
-    lines.append(f"URL: {v['url']}")
     return "\n".join(lines)
 
 
@@ -386,13 +440,26 @@ When sharing vehicle pricing include:
 Do NOT mention extra KM rate or add-ons unless customer specifically asks.
 Only share weekly/monthly price if customer specifically asks for it.
 Never mention original price.
+NEVER include vehicle URLs or links in replies — no exceptions.
 
 Example format:
 "McLaren Artura Spider 2025 — AED 999/day [23% OFF]
 200 km/day included
 Zero deposit: AED 200/day OR Security deposit: AED 5,000 (refundable in 21 days)
-Basic insurance included | + 5% VAT at checkout
-mkvluxury.com/car/mclaren-artura-spider-2025"
+Basic insurance included | + 5% VAT at checkout"
+
+BABY SEAT RULE:
+Baby seat is a PAID add-on — never free or complimentary.
+When customer asks about baby seat:
+- Share exact price per day if available from vehicle data
+- If no price available say: "Baby seat available as a paid add-on — our team will confirm the rate"
+- NEVER say baby seat is free or complimentary
+
+BUDGET FILTER RULE:
+When customer asks for cars within a budget (e.g. "under AED 1000", "budget 500 a day"):
+- List ALL available vehicles within that budget from the fleet data
+- Do not limit to 3 — show all matching options
+- Sort cheapest first
 
 CAR CHOICE CONFIRMATION RULE:
 When customer confirms a vehicle choice ("I want the Ferrari", "Book the Urus",
@@ -418,8 +485,7 @@ Once confirmed, I'll check availability and connect you with our reservations te
 
 BOOKING TRIGGER RULE:
 When customer provides dates and number of days AND confirms they want to proceed —
-respond with EXACTLY this, no variations, do NOT suggest other vehicles,
-do NOT add anything extra:
+respond with EXACTLY this, no variations, do NOT suggest other vehicles:
 
 "Perfect! 🚗 The process is simple!
 
@@ -435,8 +501,6 @@ To secure your booking reservation, kindly provide the following:
 💳 A minimum 10% advance payment is required to confirm your booking. The remaining balance is settled upon delivery. Extensions must be paid on the same day — no credit extensions.
 
 Reply with your details and we'll get everything arranged! 🌟"
-
-After sending this message, the system will automatically send the Nomod QR code for payment.
 
 DOCUMENT SUBMISSION RULE:
 When customer shares ANY of the following after a booking request:
@@ -464,8 +528,7 @@ Please scan the QR code to process your 10% advance payment via Nomod.
 
 Once payment is completed, kindly share the payment confirmation screenshot and our reservation specialist will arrange your vehicle delivery immediately.
 
-MKV Car Rental LLC
-
+MKV Car Rental LLC"
 
 AVAILABILITY CHECK RULE:
 When customer asks about a specific vehicle for specific dates:
@@ -476,11 +539,14 @@ When customer asks about a specific vehicle for specific dates:
 GENERAL RULES:
 - Always show discounted AED daily price only (never original price)
 - Mention discount % as a selling point
-- Suggest maximum 3 vehicles per reply, best match first
+- For general queries suggest maximum 3 vehicles — best match first
+- For budget queries show ALL vehicles within budget
 - Only suggest available vehicles
 - Basic insurance included with every rental
-- Full insurance and Total Protection is a paid add-on — NEVER say full insurance is free
+- Full insurance and Total Protection is a PAID add-on — NEVER say it is free
+- Baby seat is a PAID add-on — NEVER say it is free or complimentary
 - Do NOT mention extra KM charges or add-ons unless customer asks
+- NEVER include vehicle URLs or links in replies
 - Keep replies under 160 words unless it is a booking or document or payment message
 - Always end general replies with: Reserve now at mkvluxury.com or reply to book 🚗
 - Use 1-2 emojis per message — keep it premium not casual
@@ -500,6 +566,7 @@ For each vehicle include:
 - Availability status and returning date
 - Security deposit and zero deposit fee
 - Extra KM rate
+- Baby seat price if available
 - Revenue opportunity: daily price x available units
 - Flag any vehicle checked out with no return date
 
@@ -540,6 +607,7 @@ def build_admin_prompt(msg, fleet):
         f"Extra KM: AED {v.get('extra_km_rate', '40')}/km | "
         f"Zero deposit: AED {v.get('zero_deposit_fee', 'N/A')}/day | "
         f"Security deposit: AED {v.get('security_deposit', 'N/A')} | "
+        f"Baby seat: AED {v.get('baby_seat_price', 'N/A')}/day | "
         f"Status: {v['status']} | "
         f"Returning: {v['returning_date'] or 'N/A'} | "
         f"Link: {v['url']}"
@@ -671,23 +739,21 @@ def webhook():
         if not phone or not msg:
             return jsonify({"status": "ignored", "reason": "no phone or message"}), 200
 
-        msg_lower = msg.lower()
+        msg_lower  = msg.lower()
+        is_booking = any(kw in msg_lower for kw in BOOKING_KEYWORDS)
+        is_payment = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
+        is_detail  = any(kw in msg_lower for kw in DETAIL_KEYWORDS)
 
-        # Check what kind of message this is
-        is_booking  = any(kw in msg_lower for kw in BOOKING_KEYWORDS)
-        is_payment  = any(kw in msg_lower for kw in PAYMENT_KEYWORDS)
-        is_detail   = any(kw in msg_lower for kw in DETAIL_KEYWORDS)
-
-        # Pull live pricing and availability
-        mkv_vehicles = scrape_mkv_pricing()
+        # Use cached vehicles for speed — only fetch every 10 mins
+        import copy
+        mkv_vehicles = copy.deepcopy(get_cached_vehicles())
         appic_avail  = get_availability_from_appic()
         fleet        = merge_fleet(mkv_vehicles, appic_avail)
 
-        # Enrich with detail pages only if customer asks for specific details
+        # Enrich with detail pages only if needed
         if is_detail:
             fleet = enrich_fleet_with_details(fleet)
 
-        # Route by caller type
         if phone in ADMIN_NUMBERS:
             prompt = build_admin_prompt(msg, fleet)
             reply  = get_ai_response(ADMIN_SYSTEM, prompt)
@@ -697,7 +763,6 @@ def webhook():
             reply  = get_ai_response(CUSTOMER_SYSTEM, prompt)
             send_whatsapp(phone, reply, incoming_channel)
 
-            # Send QR code after booking trigger or payment trigger
             if is_booking or is_payment:
                 send_whatsapp_image(
                     phone,
@@ -722,7 +787,7 @@ def health():
     return jsonify({
         "status":  "MKV AI Agent — Kathy is running",
         "date":    str(date.today()),
-        "version": "5.2",
+        "version": "5.5",
     }), 200
 
 
@@ -734,7 +799,7 @@ def run_test():
     print("\n=== TEST 1: MKV Pricing ===")
     vehicles = scrape_mkv_pricing()
     print(f"  {len(vehicles)} vehicles found")
-    for v in vehicles[:3]:
+    for v in vehicles[:5]:
         print(f"  {v['name']} | AED {v['discounted_price']:,}/day | {v['discount_pct']}% OFF")
 
     print("\n=== TEST 2: Detail Page ===")
@@ -757,8 +822,9 @@ def run_test():
     fleet       = merge_fleet(vehicles, avail)
     avail_count = sum(1 for v in fleet if v["available"])
     print(f"  {avail_count}/{len(fleet)} available")
-    for v in fleet[:3]:
-        print(f"  {v['name']} — {v['status']} | AED {v['discounted_price']:,}/day")
+    for v in fleet:
+        if v["status"] != "Available":
+            print(f"  {v['name']} — {v['status']} | AED {v['discounted_price']:,}/day")
 
     print("\n=== ALL TESTS COMPLETE ===\n")
 
